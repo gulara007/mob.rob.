@@ -1,0 +1,77 @@
+import time
+from ev3dev2.motor import MoveSteering, OUTPUT_B, OUTPUT_C
+from ev3dev2.sensor import INPUT_1, INPUT_4
+from ev3dev2.sensor.lego import ColorSensor
+
+LEFT_WHITE = 85.0
+RIGHT_WHITE = 85.0
+
+LEFT_LINE = 12.0
+RIGHT_LINE = 12.0
+
+BASE_SPEED = 30
+
+KP = 0.5
+KI = 0.00
+KD = 0.00
+
+steer = MoveSteering(OUTPUT_B, OUTPUT_C)
+
+# Подключение датчиков цвета
+left_sensor = ColorSensor(INPUT_1)
+right_sensor = ColorSensor(INPUT_4)
+
+# Перевод датчиков в режим измерения отраженного света (Reflected Light Intensity)
+left_sensor.mode = 'COL-REFLECT'
+right_sensor.mode = 'COL-REFLECT'
+
+# Автоматический расчет целевых пороговых значений (Target Value)
+LEFT_TARGET = (LEFT_WHITE + LEFT_LINE) / 2.0
+RIGHT_TARGET = (RIGHT_WHITE + RIGHT_LINE) / 2.0
+
+def normalize_sensor(val, min_val, max_val):
+    return max(0.0, min(100.0, ((val - min_val) / (max_val - min_val)) * 100.0))
+
+def main():
+    print("Race started! Press Back button to stop.")
+    
+    integral = 0
+    last_error = 0
+    start_time = time.time()
+
+    try:
+        while True:
+            left_val = left_sensor.reflected_light_intensity
+            right_val = right_sensor.reflected_light_intensity
+
+            left_norm = normalize_sensor(left_val, LEFT_LINE, LEFT_WHITE)
+            right_norm = normalize_sensor(right_val, RIGHT_LINE, RIGHT_WHITE)
+
+            error = left_norm - right_norm
+
+            if left_norm > 70 and right_norm > 70:
+                if last_error > 0:
+                    steer.on(steering=75, speed=20)  # Резкий поворот вправо
+                else:
+                    steer.on(steering=-75, speed=20) # Резкий поворот влево
+                continue
+
+            integral += error
+            derivative = error - last_error
+            
+            integral = max(-100, min(100, integral))
+
+            turn = (KP * error) + (KI * integral) + (KD * derivative)
+            turn = max(-100, min(100, turn))
+
+            steer.on(steering=turn, speed=BASE_SPEED)
+
+            last_error = error
+
+    except KeyboardInterrupt:
+        steer.off()
+        elapsed_time = time.time() - start_time
+        print(f"\nStopped! Total Time: {elapsed_time:.2f} seconds")[cite: 1]
+
+if __name__ == "__main__":
+    main()
