@@ -1,0 +1,51 @@
+#!/usr/bin/env pybricks-micropython
+import math
+from pybricks.ev3devices import Motor
+from pybricks.parameters import Port
+from pybricks.tools import wait
+
+left_motor = Motor(Port.B)
+right_motor = Motor(Port.C)
+
+r_wheel = 2.5         
+L = 10.0          
+speed = 600  
+
+length = 110.0 
+width = 53.0    
+
+def drive_straight(distance_cm):
+    wheel_circumference = 2 * math.pi * r_wheel
+    wheel_rotations_deg = (distance_cm / wheel_circumference) * 360
+    
+    left_motor.run_angle(speed, wheel_rotations_deg, wait=False)
+    right_motor.run_angle(speed, wheel_rotations_deg, wait=True)
+    wait(100)
+
+
+def turn(angle_degrees):
+    arc_length = (abs(angle_degrees) / 360.0) * (math.pi * L)
+    
+    wheel_circumference = 2 * math.pi * r_wheel
+    wheel_rotations_deg = (arc_length / wheel_circumference) * 360
+    
+    if angle_degrees > 0:
+        left_dir = 1
+        right_dir = -1
+    else:
+        left_dir = -1
+        right_dir = 1
+
+    left_motor.run_angle(speed, left_dir * wheel_rotations_deg, wait=False)
+    right_motor.run_angle(speed, right_dir * wheel_rotations_deg, wait=True)
+    wait(100)
+
+
+def drive_rectangle(length_cm, width_cm):
+    for _ in range(2):
+        drive_straight(length_cm)  
+        turn(90)                  
+        drive_straight(width_cm)   
+        turn(90)                 
+
+drive_rectangle(length, width)
