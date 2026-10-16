@@ -17,15 +17,12 @@ KD = 0.00
 
 steer = MoveSteering(OUTPUT_B, OUTPUT_C)
 
-# Подключение датчиков цвета
 left_sensor = ColorSensor(INPUT_1)
 right_sensor = ColorSensor(INPUT_4)
 
-# Перевод датчиков в режим измерения отраженного света (Reflected Light Intensity)
 left_sensor.mode = 'COL-REFLECT'
 right_sensor.mode = 'COL-REFLECT'
 
-# Автоматический расчет целевых пороговых значений (Target Value)
 LEFT_TARGET = (LEFT_WHITE + LEFT_LINE) / 2.0
 RIGHT_TARGET = (RIGHT_WHITE + RIGHT_LINE) / 2.0
 
