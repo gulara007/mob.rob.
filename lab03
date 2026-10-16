@@ -11,23 +11,19 @@ sensor = ColorSensor(Port.S4) # Направлен вниз, ~4 мм над по
 
 robot = DriveBase(left_motor, right_motor, wheel_diameter=56, axle_track=114)
 
-# ---------- Настройки (Tuning knobs) ----------
-BASE_SPEED = 100 # мм/с на прямых
-KP = 1.0         # Пропорциональный коэффициент
-KD = 1.5         # Дифференциальный коэффициент
-SLOWDOWN = 0.4   # Замедление на изгибах
-MAX_TURN = 90    # Ограничение скорости поворота (град/с)
-EDGE = -1        # 1 = следовать одному краю, -1 = другому
+BASE_SPEED = 100 
+KP = 1.0         
+KD = 1.5         
+SLOWDOWN = 0.4   
+MAX_TURN = 90    
+EDGE = -1      
 
-# Параметры обработки углов и поиска
-LOST_THRESHOLD = 45   # Порог нормализованной ошибки для фиксации потери линии
-CORNER_ERR = 40       # Порог ошибки, при котором фиксируется резкий правый поворот
-SCAN_SPEED = 60       # Скорость вращения при поиске (град/с)
-SCAN_TIME_MS = 500    # Время поворота при сканировании (мс)
-# -----------------------------------------------
+LOST_THRESHOLD = 45  
+CORNER_ERR = 40       
+SCAN_SPEED = 60      
+SCAN_TIME_MS = 500    
 
 def sample_on_button(message):
-    """Калибровка: показывает сообщение, ждет центральную кнопку и возвращает усредненное значение."""
     ev3.screen.clear()
     ev3.screen.print(message)
     ev3.screen.print("then press CENTRE")
@@ -42,12 +38,10 @@ def sample_on_button(message):
     return total / 20
 
 def is_line_found(target, span):
-    """Проверяет, вернулся ли датчик к краю линии."""
     current_err = abs((sensor.reflection() - target) / span * 100)
     return current_err < (LOST_THRESHOLD - 10)
 
 def sweep_and_check(turn_speed, duration_ms, target, span):
-    """Поворачивает робота на месте и опрашивает датчик каждые 10 мс."""
     timer = StopWatch()
     robot.drive(0, turn_speed) # Вращение на месте БЕЗ движения вперед
     
@@ -61,27 +55,22 @@ def sweep_and_check(turn_speed, duration_ms, target, span):
     return False
 
 def scan_for_line(target, span):
-    """Сканирует сначала одну сторону, затем другую при полной потере трассы."""
     robot.stop() # Гасим инерцию вперед
     ev3.speaker.beep(frequency=1000, duration=50)
 
-    # 1. Сканируем влево
     if sweep_and_check(-SCAN_SPEED, SCAN_TIME_MS, target, span):
         return True
 
-    # 2. Сканируем вправо (на двойной угол)
     if sweep_and_check(SCAN_SPEED, SCAN_TIME_MS * 2, target, span):
         return True
 
-    # 3. Если не нашли — возвращаемся в центр
     sweep_and_check(-SCAN_SPEED, SCAN_TIME_MS, target, span)
     return False
 
-# ---------- Двухточечная калибровка ----------
 tape = sample_on_button("Sensor on TAPE")
 floor = sample_on_button("Sensor on FLOOR")
-target = (tape + floor) / 2 # Край = половина ленты + половина пола
-span = abs(floor - tape) or 1 # Защита от деления на ноль
+target = (tape + floor) / 2 
+span = abs(floor - tape) or 1 
 
 ev3.screen.clear()
 ev3.screen.print("tape {:.0f}".format(tape))
@@ -94,23 +83,17 @@ while Button.CENTER not in ev3.buttons.pressed():
 while Button.CENTER in ev3.buttons.pressed():
     wait(10)
 
-# ---------- Главный цикл ----------
 timer = StopWatch()
 last_error = 0
 
-while Button.CENTER not in ev3.buttons.pressed(): # Нажмите CENTRE для остановки
-    # Нормализованная ошибка в диапазоне ~ -50..+50
+while Button.CENTER not in ev3.buttons.pressed():
     error = (sensor.reflection() - target) / span * 100
 
-    # ОБРАБОТКА РЕЗКОГО ПОВОРОТА НАПРАВО (90 градусов):
-    # Если датчик резко улетел на белый пол, подворачиваем НАПРАВО, а не налево!
     if error > CORNER_ERR:
-        robot.drive(BASE_SPEED * 0.4, 100) # Движение с быстрым доворотом вправо
+        robot.drive(BASE_SPEED * 0.4, 100)
         wait(100)
-        # Пересчитываем ошибку после доворота
         error = (sensor.reflection() - target) / span * 100
         
-        # Если после доворота линия всё еще не найдена — запускаем сканирование
         if abs(error) > LOST_THRESHOLD:
             found = scan_for_line(target, span)
             if not found:
@@ -125,13 +108,11 @@ while Button.CENTER not in ev3.buttons.pressed(): # Нажмите CENTRE для
     last_error = error
 
     turn = EDGE * (KP * error + KD * derivative)
-    turn = max(-MAX_TURN, min(MAX_TURN, turn)) # Ограничиваем резкость поворота
+    turn = max(-MAX_TURN, min(MAX_TURN, turn))
 
-    # Замедление на крутых изгибах
     speed = BASE_SPEED * (1 - SLOWDOWN * min(abs(error), 50) / 50)
     robot.drive(speed, turn)
-    wait(25) # ~40 Гц — частота обновления датчика
-
+    wait(25) # ~40 Гц 
 robot.stop()
 ev3.screen.clear()
 ev3.screen.print("Time: {:.2f} s".format(timer.time() / 1000))
