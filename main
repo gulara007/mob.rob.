@@ -1,0 +1,327 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * Lab 6 — NUCLEO-F401RE  (field node on the bench)
+  *
+  *  USART1  PA9 (D8) TX  -> board A RX (GPIO18)      sends readings
+  *          PA10 (D2) RX <- board A TX (GPIO17)
+  *  USART6  PC6 (CN10 pin 4) TX -> board B RX (GPIO18)
+  *          PC7 (D9) RX          <- board B TX (GPIO17)   receives readings + RSSI
+  *  USART2  PA2/PA3 -> ST-LINK virtual COM port -> console on the PC
+  *  TIM2    1 tick = 1 us, 32-bit, free running -> discovery time dt
+  *
+  *  Frame: 0xAA | LEN | PAYLOAD[LEN] | CHK   (CHK = LEN ^ all payload bytes)
+  *  STM32 -> A : seq(uint16 LE) | temp*100(int16 LE)
+  *  B -> STM32 : seq(uint16 LE) | temp*100(int16 LE) | rssi(int8)
+  *
+  *  IMPORTANT: this file needs the .ioc configured with USART1, USART2,
+  *  USART6 (+ "USART6 global interrupt" ticked) and TIM2 (Internal Clock),
+  *  so that CubeMX generates the pin set-up (stm32f4xx_hal_msp.c) and
+  *  USART6_IRQHandler (stm32f4xx_it.c).
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+
+/* USER CODE BEGIN Includes */
+#include <stdio.h>
+#include <string.h>
+/* USER CODE END Includes */
+
+/* USER CODE BEGIN PD */
+#define PERIOD_MS   1000   /* new reading every 1 s. For 6C at 1022.5 ms use 3000 */
+#define JITTER_MS   300    /* random extra pause so trials don't sync with advertising */
+/* USER CODE END PD */
+
+/* Private variables ---------------------------------------------------------*/
+TIM_HandleTypeDef htim2;
+UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart6;
+
+/* USER CODE BEGIN PV */
+static uint8_t  rx6_byte;
+static uint8_t  rx_payload[32];
+static volatile uint8_t rx_len = 0;
+static volatile uint8_t frame_ready = 0;
+
+static uint16_t seq = 0;
+static uint16_t seq_sent = 0;
+static uint32_t t_sent_us = 0;
+
+static uint32_t received = 0;
+static uint16_t first_seq = 0;
+static uint8_t  have_first = 0;
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_USART1_UART_Init(void);
+static void MX_USART2_UART_Init(void);
+static void MX_USART6_UART_Init(void);
+static void MX_TIM2_Init(void);
+
+/* USER CODE BEGIN 0 */
+/* printf -> USART2 (console on the PC) */
+int __io_putchar(int ch)
+{
+  HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, HAL_MAX_DELAY);
+  return ch;
+}
+
+/* send one frame: 0xAA | LEN | PAYLOAD | CHK */
+static void send_frame(UART_HandleTypeDef *h, const uint8_t *p, uint8_t len)
+{
+  uint8_t buf[40];
+  uint8_t chk = len;
+  buf[0] = 0xAA;
+  buf[1] = len;
+  for (uint8_t i = 0; i < len; i++) { buf[2 + i] = p[i]; chk ^= p[i]; }
+  buf[2 + len] = chk;
+  HAL_UART_Transmit(h, buf, len + 3, 100);
+}
+
+/* byte-by-byte receiver for USART6 (board B) */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  static uint8_t state = 0, n = 0, idx = 0, chk = 0, buf[32];
+
+  if (huart->Instance == USART6) {
+    uint8_t b = rx6_byte;
+    switch (state) {
+      case 0: if (b == 0xAA) state = 1; break;
+      case 1: n = b; chk = b; idx = 0;
+              state = (n > 0 && n <= sizeof(buf)) ? 2 : 0; break;
+      case 2: buf[idx++] = b; chk ^= b; if (idx == n) state = 3; break;
+      case 3: state = 0;
+              if (b == chk && !frame_ready) {
+                memcpy(rx_payload, buf, n);
+                rx_len = n;
+                frame_ready = 1;
+              }
+              break;
+    }
+    HAL_UART_Receive_IT(&huart6, &rx6_byte, 1);
+  }
+}
+
+/* if a UART error happens (overrun etc.), restart reception */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART6) {
+    HAL_UART_Receive_IT(&huart6, &rx6_byte, 1);
+  }
+}
+/* USER CODE END 0 */
+
+int main(void)
+{
+  HAL_Init();
+  SystemClock_Config();
+
+  MX_GPIO_Init();
+  MX_USART1_UART_Init();
+  MX_USART2_UART_Init();
+  MX_USART6_UART_Init();
+  MX_TIM2_Init();
+
+  /* USER CODE BEGIN 2 */
+  HAL_TIM_Base_Start(&htim2);
+  HAL_UART_Receive_IT(&huart6, &rx6_byte, 1);
+  printf("\r\nLab 6 start\r\n");
+  uint32_t next_send = HAL_GetTick() + 1000;
+  /* USER CODE END 2 */
+
+  while (1)
+  {
+    /* USER CODE BEGIN 3 */
+
+    /* 1) time to hand board A a new reading */
+    if ((int32_t)(HAL_GetTick() - next_send) >= 0) {
+      seq++;
+      int16_t temp_c100 = 2300 + (seq % 100);      /* fake sensor: 23.00..23.99 C */
+      uint8_t p[4] = { (uint8_t)(seq & 0xFF), (uint8_t)(seq >> 8),
+                       (uint8_t)((uint16_t)temp_c100 & 0xFF),
+                       (uint8_t)((uint16_t)temp_c100 >> 8) };
+      seq_sent  = seq;
+      t_sent_us = __HAL_TIM_GET_COUNTER(&htim2);   /* TIM2 "start" */
+      send_frame(&huart1, p, 4);
+      next_send = HAL_GetTick() + PERIOD_MS + (t_sent_us % (JITTER_MS + 1));
+    }
+
+    /* 2) board B reported a reading */
+    if (frame_ready) {
+      uint32_t now_us = __HAL_TIM_GET_COUNTER(&htim2);  /* TIM2 "stop" */
+      if (rx_len >= 5) {
+        uint16_t rseq = rx_payload[0] | (rx_payload[1] << 8);
+        int16_t  t    = (int16_t)(rx_payload[2] | (rx_payload[3] << 8));
+        int8_t   rssi = (int8_t)rx_payload[4];
+
+        static uint16_t last_rseq = 0;
+        if (have_first && rseq == last_rseq) {   /* same reading twice -> ignore */
+          frame_ready = 0;
+          continue;
+        }
+        last_rseq = rseq;
+
+        if (!have_first) { first_seq = rseq; have_first = 1; }
+        received++;
+        uint32_t expected = (uint16_t)(rseq - first_seq) + 1;
+        uint32_t lost = (expected > received) ? expected - received : 0;
+
+        int ta = (t < 0) ? -t : t;
+        printf("seq=%u t=%s%d.%02d rssi=%d", rseq, (t < 0) ? "-" : "",
+               ta / 100, ta % 100, rssi);
+
+        if (rseq == seq_sent) {
+          uint32_t dt = now_us - t_sent_us;        /* microseconds */
+          printf(" dt=%lu.%03lu ms", dt / 1000, dt % 1000);
+        }
+        printf(" rx=%lu lost=%lu\r\n", received, lost);
+      }
+      frame_ready = 0;
+    }
+
+    /* USER CODE END 3 */
+  }
+}
+
+/**
+  * System Clock: HSI 16 MHz -> PLL -> SYSCLK 84 MHz
+  * APB1 = 42 MHz (timer clock 84 MHz), APB2 = 84 MHz
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE2);
+
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM = 16;
+  RCC_OscInitStruct.PLL.PLLN = 336;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;
+  RCC_OscInitStruct.PLL.PLLQ = 7;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                              | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/* TIM2: 84 MHz / (83+1) = 1 MHz -> 1 tick = 1 us, 32-bit free running */
+static void MX_TIM2_Init(void)
+{
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 83;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 4294967295;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+static void MX_USART1_UART_Init(void)
+{
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+static void MX_USART2_UART_Init(void)
+{
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+static void MX_USART6_UART_Init(void)
+{
+  huart6.Instance = USART6;
+  huart6.Init.BaudRate = 115200;
+  huart6.Init.WordLength = UART_WORDLENGTH_8B;
+  huart6.Init.StopBits = UART_STOPBITS_1;
+  huart6.Init.Parity = UART_PARITY_NONE;
+  huart6.Init.Mode = UART_MODE_TX_RX;
+  huart6.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart6.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+static void MX_GPIO_Init(void)
+{
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+}
+
+void Error_Handler(void)
+{
+  __disable_irq();
+  while (1)
+  {
+  }
+}
+
+#ifdef USE_FULL_ASSERT
+void assert_failed(uint8_t *file, uint32_t line)
+{
+}
+#endif /* USE_FULL_ASSERT */
