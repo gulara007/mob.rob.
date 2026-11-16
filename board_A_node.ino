@@ -1,17 +1,3 @@
-// ===================== Lab 6 — Board A (node, advertiser) =====================
-// Receives a reading from STM32 over UART (STM32 USART1 <-> GPIO17/18),
-// packs it with pack_reading() and advertises it as NON-CONNECTABLE
-// manufacturer data every ADV_INTERVAL_UNITS * 0.625 ms.
-//
-// Wiring:  STM32 D8 (PA9, TX)  -> GPIO18 (RX)
-//          STM32 D2 (PA10, RX) <- GPIO17 (TX)
-//          GND                 -- GND
-//
-// UART frame (replace with your Lecture 5 frame if it differs):
-//   0xAA | LEN | PAYLOAD[LEN] | CHK      CHK = LEN ^ PAYLOAD[0] ^ ... ^ PAYLOAD[LEN-1]
-// Payload STM32 -> A:  seq (uint16 LE) | temp*100 (int16 LE)   = 4 bytes
-// ==============================================================================
-
 #include <BLEDevice.h>
 #include <BLEAdvertising.h>
 #include "esp_bt.h"
